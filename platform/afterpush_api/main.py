@@ -15,6 +15,7 @@ from afterpush_api.schemas import (
     ApplicationUpdate,
     DeploymentCreate,
     DeploymentResponse,
+    DeploymentStatusUpdate,
     ProjectCreate,
     ProjectResponse,
 )
@@ -448,4 +449,47 @@ def get_deployment(
             detail="Deployment not found",
         )
 
+    return deployment
+
+@app.patch(
+    "/api/v1/deployments/{deployment_id}/status",
+    response_model=DeploymentResponse,
+    responses={
+        404: {"description": "Deployment not found"},
+        409: {"description": "Invalid deployment status transition"},
+        422: {"description": "Invalid deployment ID or status"},
+    },
+)
+def update_deployment_status(
+    deployment_id: UUID,
+    update: DeploymentStatusUpdate,
+    db: Session = Depends(get_db),
+):
+    allowed_transitions = {
+        "pending": {"running"},
+        "running": {"succeeded", "failed"},
+        "succeeded": set(),
+        "failed": set(),
+    }
+
+    # Lock the row to serialize competing status updates on PostgreSQL.
+    deployment = (
+        db.query(Deployment)
+        .filter(Deployment.id == deployment_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if deployment is None:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    if update.status not in allowed_transitions.get(deployment.status, set()):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot transition deployment from {deployment.status} to {update.status}",
+        )
+
+    deployment.status = update.status
+    db.commit()
+    db.refresh(deployment)
     return deployment
